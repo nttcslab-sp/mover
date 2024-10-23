@@ -2,8 +2,8 @@
 
 Tag and push to GitHub:
 ```shell
-git clone git@github.com:fgnt/meeteval.git
-cd meeteval
+git clone https://github.com/nttcslab-sp/mover
+cd mover
 pip install --upgrade bump2version
 bump2version --verbose --tag patch  # major, minor or patch
 git push origin --tags

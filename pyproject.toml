@@ -1,2 +1,10 @@
 [build-system]
 requires = ["setuptools", "wheel", "Cython", "numpy"]
+[tool.isort]
+profile = "black"
+
+[tool.black]
+line-length = 120
+
+[tool.pycodestyle]
+max_line_length = 120

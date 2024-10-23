@@ -1,0 +1,219 @@
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+from dover_lap.libs.rttm import load_rttm, write_rttm
+from dover_lap.libs.turn import Turn, merge_turns, trim_turns
+from dover_lap.libs.uem import load_uem
+from dover_lap.libs.utils import (
+    PythonLiteralOption,
+    command_required_option,
+    error,
+    groupby,
+    info,
+    warn,
+)
+from dover_lap.src.label_mapping import LabelMapping
+from dover_lap.src.mapping import GreedyMap
+from dover_lap.src.mapping.map_utils import *
+from numpy.random import default_rng
+from spyder import DER
+
+
+class HungarianMap:
+    def __init__(self) -> None:
+        pass
+
+    def compute_mapping(
+        self,
+        turns_list: List[List[Turn]],
+    ) -> Tuple[Dict[Tuple[int, str], int], np.ndarray]:
+        """
+        Use Hungarian algorithm for label mapping for 2 system special case.
+        """
+        self.turns_list = turns_list
+
+        weights = self._compute_weights()
+        # Sort the hypotheses by their weights
+        sorted_idx = weights.argsort().tolist()
+        self.sorted_turns_list = [self.turns_list[i] for i in sorted_idx]
+
+        cur_turns = self.sorted_turns_list[0]
+        self.global_mapping = dict()
+
+        for i in range(1, len(self.sorted_turns_list)):
+            next_turns = self.sorted_turns_list[i]
+            local_mapping = self._map_pair(cur_turns, next_turns)
+            cur_turns = self._merge_pair(cur_turns, next_turns, local_mapping)
+            self._update_global_map(local_mapping)
+
+        if not self._validate_global_mapping():
+            raise Exception("Some speakers have not been mapped")
+        return self.global_mapping, weights, sorted_idx
+
+    def _validate_global_mapping(self) -> bool:
+        for i, turns in enumerate(self.sorted_turns_list):
+            groups = {key: list(group) for key, group in groupby(turns, lambda x: x.speaker_id)}
+            for spk in groups:
+                if (i, spk) not in self.global_mapping:
+                    return False
+        return True
+
+    def _compute_weights(self) -> np.ndarray:
+        N = len(self.turns_list)
+        DERs = np.zeros(N)
+        for i in range(N):
+            DER_i = []
+            hyp = [(turn.speaker_id, turn.onset, turn.offset) for turn in self.turns_list[i]]
+            for j in range(N):
+                if i == j:
+                    continue
+                ref = [(turn.speaker_id, turn.onset, turn.offset) for turn in self.turns_list[j]]
+                der = DER(ref, hyp).der
+                DER_i.append(der)
+            DERs[i] = np.mean(DER_i)
+        return DERs
+
+    def _map_pair(self, ref_turns: List[Turn], sys_turns: List[Turn]) -> Dict[Tuple[int, str], int]:
+        ref = [(turn.speaker_id, turn.onset, turn.offset) for turn in ref_turns]
+        sys = [(turn.speaker_id, turn.onset, turn.offset) for turn in sys_turns]
+        metrics = DER(ref, sys)
+        ref_map = metrics.ref_map
+        sys_map = metrics.hyp_map
+
+        label_mapping = {}
+        for k, v in ref_map.items():
+            label_mapping[(0, k)] = v
+        for k, v in sys_map.items():
+            label_mapping[(1, k)] = v
+
+        return label_mapping
+
+    def _merge_pair(
+        self,
+        ref_turns: List[Turn],
+        sys_turns: List[Turn],
+        label_map: Dict[Tuple[int, int], int],
+    ) -> List[Turn]:
+        ref_turns_mapped = [
+            Turn(
+                onset=turn.onset,
+                offset=turn.offset,
+                speaker_id=label_map[(0, turn.speaker_id)],
+            )
+            for turn in ref_turns
+        ]
+        sys_turns_mapped = [
+            Turn(
+                onset=turn.onset,
+                offset=turn.offset,
+                speaker_id=label_map[(1, turn.speaker_id)],
+            )
+            for turn in sys_turns
+        ]
+        all_turns = merge_turns(ref_turns_mapped + sys_turns_mapped)
+        return all_turns
+
+    def _update_global_map(self, local_map: Dict[Tuple[int, str], int]) -> None:
+        if not self.global_mapping:
+            self.global_mapping = local_map.copy()
+            return
+        new_global_map = {}
+        max_file_id = 0
+        for key, old_id in self.global_mapping.items():
+            file_id, spk_id = key
+            max_file_id = max(max_file_id, file_id)
+            new_global_map[key] = local_map[(0, old_id)]
+        for key, val in local_map.items():
+            file_id, spk_id = key
+            if file_id == 1:
+                new_global_map[(max_file_id + 1, spk_id)] = val
+        self.global_mapping = new_global_map.copy()
+
+
+class LabelMapping:
+    @classmethod
+    def get_mapped_turns_list(
+        cls,
+        turns_list: List[List[Turn]],
+        file_id: str,
+        method: Optional[str] = "greedy",
+        second_maximal: Optional[bool] = False,
+    ) -> List[List[Turn]]:
+        """
+        This function takes turns list from all RTTMs and applies an n-dimensional
+        matching approximation algorithm to map all to a common label space.
+        """
+
+        if (len(turns_list) == 2) or (method == "hungarian"):
+            # We replace the original turns list with one sorted by average DER
+            hungarian_map = HungarianMap()
+            label_mapping, weights, sorted_idx = hungarian_map.compute_mapping(turns_list)
+            turns_list = hungarian_map.sorted_turns_list
+
+        elif method == "greedy":
+            greedy_map = GreedyMap(second_maximal=second_maximal)
+            label_mapping, weights = greedy_map.compute_mapping(turns_list)
+            sorted_idx = list(range(len(turns_list)))
+
+        else:
+            raise RuntimeError(method)
+
+        return label_mapping, weights, sorted_idx
+
+
+def get_speaker_mapping(
+    seglst_list,
+    uem_file=None,
+    method="hungarian",
+    second_maximal=False,
+    seed=0,
+):
+    # turns_list = load_rttms(input_rttms)
+    turns_list = [
+        [
+            Turn(
+                onset=seg["start_time"],
+                offset=seg["end_time"],
+                dur=None,
+                speaker_id=seg["speaker"],
+                file_id=seg["session_id"],
+                weight=None,
+            )
+            for seg in seglst
+            if seg["end_time"] > seg["start_time"]
+        ]
+        for seglst in seglst_list
+    ]
+
+    if uem_file is not None:
+        uem = load_uem(uem_file)
+
+        turns_list = [trim_turns(turns, uem) for turns in turns_list]
+
+    turns_list = [merge_turns(turns) for turns in turns_list]
+
+    file_to_turns_list = dict()
+    for turns in turns_list:
+        for fid, g in groupby(turns, lambda x: x.file_id):
+            if fid in file_to_turns_list:
+                file_to_turns_list[fid].append(list(g))
+            else:
+                file_to_turns_list[fid] = [list(g)]
+
+    file_to_out_turns = dict()
+    for file_id in file_to_turns_list:
+        turns_list = file_to_turns_list[file_id]
+        # rg = default_rng(seed)
+        # rg.shuffle(
+        #     turns_list
+        # )  # We shuffle so that the hypothesis order is randomized
+        label_mapping, weights, sorted_idx = LabelMapping.get_mapped_turns_list(
+            turns_list,
+            file_id,
+            method=method,
+            second_maximal=second_maximal,
+        )
+        label_mapping = {(sorted_idx[idx], spk_id): new_spk_id for (idx, spk_id), new_spk_id in label_mapping.items()}
+        file_to_out_turns[file_id] = label_mapping, sorted_idx
+
+    return file_to_out_turns
