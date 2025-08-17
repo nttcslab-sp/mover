@@ -8,33 +8,9 @@ from Cython.Build import cythonize
 ext_modules = cythonize(
     [
         Extension(
-            "mover._meeteval.wer.matching.cy_orc_matching",
-            ["mover/_meeteval/wer/matching/cy_orc_matching.pyx"],
-            extra_compile_args=["-std=c++11"],
-            extra_link_args=["-std=c++11"],
-        ),
-        Extension(
-            "mover._meeteval.wer.matching.cy_mimo_matching",
-            ["mover/_meeteval/wer/matching/cy_mimo_matching.pyx"],
-            extra_compile_args=["-std=c++11"],
-            extra_link_args=["-std=c++11"],
-        ),
-        Extension(
             "mover._meeteval.wer.matching.cy_levenshtein",
             ["mover/_meeteval/wer/matching/cy_levenshtein.pyx"],
             extra_compile_args=["-std=c++11"],
-            extra_link_args=["-std=c++11"],
-        ),
-        Extension(
-            "mover._meeteval.wer.matching.cy_time_constrained_orc_matching",
-            ["mover/_meeteval/wer/matching/cy_time_constrained_orc_matching.pyx"],
-            extra_compile_args=["-std=c++11", "-O3"],
-            extra_link_args=["-std=c++11"],
-        ),
-        Extension(
-            "mover._meeteval.wer.matching.cy_greedy_combination_matching",
-            ["mover/_meeteval/wer/matching/cy_greedy_combination_matching.pyx"],
-            extra_compile_args=["-std=c++11", "-O3"],
             extra_link_args=["-std=c++11"],
         ),
     ]
